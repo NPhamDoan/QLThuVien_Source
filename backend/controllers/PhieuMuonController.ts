@@ -1,0 +1,287 @@
+import Database from 'better-sqlite3';
+import {
+  PhieuMuon,
+  ValidationResult,
+  BookStatus,
+  ReturnResult,
+  TrangThaiPhieu,
+} from '../types';
+import { removeDiacritics, matchesAny } from '../utils/diacritics';
+
+export class PhieuMuonController {
+  private db: Database.Database;
+
+  constructor(db: Database.Database) {
+    this.db = db;
+  }
+
+  // === Active loans list ===
+
+  getActiveLoans(): (PhieuMuon & { tenDocGia?: string; tenSach?: string })[] {
+    const rows = this.db.prepare(`
+      SELECT pm.*, dg.hoTen AS tenDocGia, s.tieuDe AS tenSach
+      FROM PhieuMuon pm
+      LEFT JOIN DocGia dg ON pm.maDocGia = dg.maDocGia
+      LEFT JOIN Sach s ON pm.maSach = s.maSach
+      WHERE pm.trangThai = ?
+      ORDER BY pm.ngayMuon DESC
+    `).all(TrangThaiPhieu.DANG_MUON) as Record<string, unknown>[];
+    return rows.map((r) => ({
+      ...this.mapRowToPhieuMuon(r),
+      tenDocGia: r.tenDocGia as string | undefined,
+      tenSach: r.tenSach as string | undefined,
+    }));
+  }
+
+  searchActiveLoans(keyword: string, searchType: string = 'all'): (PhieuMuon & { tenDocGia?: string; tenSach?: string })[] {
+    // Load all active loans with reader/book names
+    const rows = this.db.prepare(`
+      SELECT pm.*, dg.hoTen AS tenDocGia, s.tieuDe AS tenSach
+      FROM PhieuMuon pm
+      LEFT JOIN DocGia dg ON pm.maDocGia = dg.maDocGia
+      LEFT JOIN Sach s ON pm.maSach = s.maSach
+      WHERE pm.trangThai = ?
+      ORDER BY pm.ngayMuon DESC
+    `).all(TrangThaiPhieu.DANG_MUON) as Record<string, unknown>[];
+
+    const filtered = rows.filter((r) => {
+      const tenDocGia = r.tenDocGia as string | undefined;
+      const tenSach = r.tenSach as string | undefined;
+      const maPhieu = r.maPhieu as string;
+      const maDocGia = r.maDocGia as string;
+      const maSach = r.maSach as string;
+
+      switch (searchType) {
+        case 'docgia':
+          return matchesAny([tenDocGia, maDocGia], keyword);
+        case 'sach':
+          return matchesAny([tenSach, maSach], keyword);
+        case 'maphieu':
+          return matchesAny([maPhieu], keyword);
+        default:
+          return matchesAny([tenDocGia, tenSach, maPhieu, maDocGia, maSach], keyword);
+      }
+    });
+
+    return filtered.map((r) => ({
+      ...this.mapRowToPhieuMuon(r),
+      tenDocGia: r.tenDocGia as string | undefined,
+      tenSach: r.tenSach as string | undefined,
+    }));
+  }
+
+  // === Validation functions ===
+
+  validateMember(maDocGia: string): ValidationResult {
+    const row = this.db.prepare(
+      'SELECT maDocGia, ngayHetHan FROM DocGia WHERE maDocGia = ?'
+    ).get(maDocGia) as { maDocGia: string; ngayHetHan: string } | undefined;
+
+    if (!row) {
+      return { valid: false, message: 'Mã độc giả không tồn tại' };
+    }
+
+    const today = new Date().toISOString().split('T')[0];
+    if (row.ngayHetHan < today) {
+      return { valid: false, message: `Thẻ độc giả đã hết hạn từ ngày: ${row.ngayHetHan}` };
+    }
+
+    return { valid: true };
+  }
+
+  checkBookAvailability(maSach: string): BookStatus {
+    const book = this.db.prepare(
+      'SELECT soBanSao, soMat, soBaoTri FROM Sach WHERE maSach = ?'
+    ).get(maSach) as { soBanSao: number; soMat: number; soBaoTri: number } | undefined;
+
+    if (!book) {
+      return { available: false, soKhaDung: 0, message: 'Mã sách không tồn tại' };
+    }
+
+    const soDangMuon = (this.db.prepare(
+      'SELECT COUNT(*) as count FROM PhieuMuon WHERE maSach = ? AND trangThai = ?'
+    ).get(maSach, TrangThaiPhieu.DANG_MUON) as { count: number }).count;
+
+    const soKhaDung = book.soBanSao - book.soMat - book.soBaoTri - soDangMuon;
+
+    if (soKhaDung <= 0) {
+      return { available: false, soKhaDung, message: 'Hết bản khả dụng để mượn' };
+    }
+
+    return { available: true, soKhaDung };
+  }
+
+  // === createLoan ===
+
+  createLoan(maDocGia: string, maSach: string): PhieuMuon {
+    const createLoanTx = this.db.transaction(() => {
+      // Re-check availability inside transaction (race-condition safe)
+      const book = this.db.prepare('SELECT soBanSao, soMat, soBaoTri FROM Sach WHERE maSach = ?').get(maSach) as { soBanSao: number; soMat: number; soBaoTri: number } | undefined;
+      if (!book) throw new Error('Mã sách không tồn tại');
+      const soDangMuon = (this.db.prepare('SELECT COUNT(*) as count FROM PhieuMuon WHERE maSach = ? AND trangThai = ?').get(maSach, TrangThaiPhieu.DANG_MUON) as { count: number }).count;
+      if (book.soBanSao - book.soMat - book.soBaoTri - soDangMuon <= 0) {
+        throw new Error('Hết bản khả dụng để mượn');
+      }
+
+      const last = this.db.prepare("SELECT maPhieu FROM PhieuMuon WHERE maPhieu LIKE 'PM%' ORDER BY CAST(SUBSTR(maPhieu, 3) AS INTEGER) DESC LIMIT 1").get() as { maPhieu: string } | undefined;
+      const nextNum = last ? parseInt(last.maPhieu.substring(2)) + 1 : 1;
+      const maPhieu = 'PM' + String(nextNum).padStart(3, '0');
+      const ngayMuon = new Date().toISOString().split('T')[0];
+      const hanTraDate = new Date();
+      hanTraDate.setDate(hanTraDate.getDate() + 14);
+      const hanTra = hanTraDate.toISOString().split('T')[0];
+
+      this.db.prepare(`
+        INSERT INTO PhieuMuon (maPhieu, maDocGia, maSach, ngayMuon, hanTra, trangThai, tienPhat)
+        VALUES (?, ?, ?, ?, ?, ?, 0)
+      `).run(maPhieu, maDocGia, maSach, ngayMuon, hanTra, TrangThaiPhieu.DANG_MUON);
+
+      // KHÔNG update Sach nữa - availability tự derive từ counters + PhieuMuon
+
+      const row = this.db.prepare('SELECT * FROM PhieuMuon WHERE maPhieu = ?').get(maPhieu) as Record<string, unknown>;
+      return this.mapRowToPhieuMuon(row);
+    });
+
+    return createLoanTx();
+  }
+
+  // === findLoan ===
+
+  findLoanByCode(maPhieu: string): PhieuMuon | null {
+    const row = this.db.prepare(
+      'SELECT * FROM PhieuMuon WHERE maPhieu = ?'
+    ).get(maPhieu) as Record<string, unknown> | undefined;
+
+    if (!row) return null;
+    return this.mapRowToPhieuMuon(row);
+  }
+
+  /** Get loan details với đầy đủ thông tin độc giả + sách (cho in phiếu) */
+  getLoanDetails(maPhieu: string) {
+    const row = this.db.prepare(`
+      SELECT pm.*,
+             dg.hoTen AS dg_hoTen, dg.email AS dg_email, dg.soDienThoai AS dg_soDienThoai,
+             s.tieuDe AS s_tieuDe, s.tacGia AS s_tacGia
+      FROM PhieuMuon pm
+      LEFT JOIN DocGia dg ON pm.maDocGia = dg.maDocGia
+      LEFT JOIN Sach s ON pm.maSach = s.maSach
+      WHERE pm.maPhieu = ?
+    `).get(maPhieu) as Record<string, unknown> | undefined;
+
+    if (!row) return null;
+
+    return {
+      ...this.mapRowToPhieuMuon(row),
+      docGia: {
+        maDocGia: row.maDocGia as string,
+        hoTen: row.dg_hoTen as string,
+        email: row.dg_email as string,
+        soDienThoai: row.dg_soDienThoai as string,
+      },
+      sach: {
+        maSach: row.maSach as string,
+        tieuDe: row.s_tieuDe as string,
+        tacGia: row.s_tacGia as string,
+      },
+    };
+  }
+
+  findLoanByBook(maSach: string): PhieuMuon | null {
+    const row = this.db.prepare(
+      'SELECT * FROM PhieuMuon WHERE maSach = ? AND trangThai = ?'
+    ).get(maSach, TrangThaiPhieu.DANG_MUON) as Record<string, unknown> | undefined;
+
+    if (!row) return null;
+    return this.mapRowToPhieuMuon(row);
+  }
+
+  // === calculateFine ===
+
+  calculateFine(hanTra: Date, ngayTraThucTe: Date): number {
+    if (ngayTraThucTe > hanTra) {
+      const diffMs = ngayTraThucTe.getTime() - hanTra.getTime();
+      const diffDays = Math.ceil(diffMs / (1000 * 60 * 60 * 24));
+      return diffDays * 5000;
+    }
+    return 0;
+  }
+
+  // === returnBook ===
+
+  returnBook(maPhieu: string, options: { daMatSach?: boolean; phiMat?: number } = {}): ReturnResult {
+    const returnBookTx = this.db.transaction(() => {
+      const loan = this.findLoanByCode(maPhieu);
+
+      if (!loan) {
+        return { success: false, tienPhat: 0, ngayTraThucTe: new Date(), message: 'Không tìm thấy phiếu mượn' };
+      }
+
+      if (loan.trangThai !== TrangThaiPhieu.DANG_MUON) {
+        return { success: false, tienPhat: 0, ngayTraThucTe: new Date(), message: 'Phiếu mượn này đã được trả trước đó' };
+      }
+
+      const ngayTraThucTe = new Date();
+      const finePhatTre = this.calculateFine(loan.hanTra, ngayTraThucTe);
+      const phiMat = options.daMatSach ? (options.phiMat ?? 0) : 0;
+      const tienPhat = finePhatTre + phiMat;
+      const ngayTraStr = ngayTraThucTe.toISOString().split('T')[0];
+
+      this.db.prepare(`
+        UPDATE PhieuMuon SET trangThai = ?, ngayTraThucTe = ?, tienPhat = ?, updatedAt = datetime('now')
+        WHERE maPhieu = ?
+      `).run(TrangThaiPhieu.DA_TRA, ngayTraStr, tienPhat, maPhieu);
+
+      // Nếu sách bị mất, tăng counter soMat
+      if (options.daMatSach) {
+        this.db.prepare(
+          `UPDATE Sach SET soMat = soMat + 1, updatedAt = datetime('now') WHERE maSach = ?`
+        ).run(loan.maSach);
+      }
+
+      return { success: true, tienPhat, ngayTraThucTe, daMatSach: options.daMatSach };
+    });
+
+    return returnBookTx();
+  }
+
+  // === extendLoan ===
+
+  extendLoan(maPhieu: string): PhieuMuon {
+    const loan = this.findLoanByCode(maPhieu);
+
+    if (!loan) {
+      throw new Error('Không tìm thấy phiếu mượn');
+    }
+
+    if (loan.trangThai !== TrangThaiPhieu.DANG_MUON) {
+      throw new Error('Phiếu mượn đã hoàn tất, không thể gia hạn');
+    }
+
+    const hanTraMoi = new Date(loan.hanTra);
+    hanTraMoi.setDate(hanTraMoi.getDate() + 7);
+    const hanTraMoiStr = hanTraMoi.toISOString().split('T')[0];
+
+    this.db.prepare(`
+      UPDATE PhieuMuon SET hanTra = ?, updatedAt = datetime('now') WHERE maPhieu = ?
+    `).run(hanTraMoiStr, maPhieu);
+
+    return this.findLoanByCode(maPhieu)!;
+  }
+
+  // === Helper ===
+
+  private mapRowToPhieuMuon(row: Record<string, unknown>): PhieuMuon {
+    return {
+      maPhieu: row.maPhieu as string,
+      maDocGia: row.maDocGia as string,
+      maSach: row.maSach as string,
+      ngayMuon: new Date(row.ngayMuon as string),
+      hanTra: new Date(row.hanTra as string),
+      ngayTraThucTe: row.ngayTraThucTe ? new Date(row.ngayTraThucTe as string) : null,
+      trangThai: row.trangThai as TrangThaiPhieu,
+      tienPhat: row.tienPhat as number,
+      createdAt: new Date(row.createdAt as string),
+      updatedAt: new Date(row.updatedAt as string),
+    };
+  }
+}
