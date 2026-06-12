@@ -1,6 +1,9 @@
 #!/bin/bash
-# Render Build Command — dùng npm, không cần pnpm
+# Render Build Command — dùng npm
 set -e
+
+# Đảm bảo install cả devDependencies (cần cho build: tsc, vite)
+export NODE_ENV=development
 
 echo "=== Installing backend dependencies ==="
 cd backend
