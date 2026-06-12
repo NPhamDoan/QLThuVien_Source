@@ -61,7 +61,7 @@ export default function LoginPage() {
           {/* Book illustration using SVG */}
           <div style={{ position: 'relative', zIndex: 1, textAlign: 'center', animation: 'fadeInUp 0.6s ease-out 0.1s both' }}>
             <img
-              src="/book-illustration.svg"
+              src="/ptit.png"
               alt="PTIT Logo"
               width={220}
               height={180}
