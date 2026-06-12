@@ -1,20 +1,17 @@
 #!/bin/bash
-# Render Build Command — dùng npm
+# Render Build Command
 set -e
-
-# Đảm bảo install cả devDependencies (cần cho build: tsc, vite)
-export NODE_ENV=development
 
 echo "=== Installing backend dependencies ==="
 cd backend
-npm install
+NODE_ENV=development npm install
 
 echo "=== Installing frontend dependencies ==="
 cd ../frontend
-npm install
+NODE_ENV=development npm install
 
-echo "=== Building frontend (Vite) ==="
-npm run build
+echo "=== Building frontend (Vite - production mode) ==="
+NODE_ENV=production npm run build
 
 echo "=== Building backend (TypeScript) ==="
 cd ../backend
