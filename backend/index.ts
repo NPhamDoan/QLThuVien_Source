@@ -61,7 +61,16 @@ app.get('*', (_req, res) => {
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`Server running on http://localhost:${PORT}`);
+    console.log('');
+  console.log('='.repeat(50));
+  console.log(`  BE (API):  http://localhost:${PORT}`);
+  if (fs.existsSync(frontendDist)) {
+    console.log(`  App:       http://localhost:${PORT}  (production)`);
+  } else {
+    console.log(`  FE (Dev):  http://localhost:5173`);
+  }
+  console.log('='.repeat(50));
+  console.log('');
 });
 
 export default app;

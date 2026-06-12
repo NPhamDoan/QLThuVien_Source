@@ -1,0 +1,32 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+tsconfig.tsbuildinfo
+
+# Database
+backend/Database/*.db
+backend/Database/*.db-shm
+backend/Database/*.db-wal
+backend/backups/
+
+# Delivery/Deploy output
+QLThuVien_Source/
+Deploy/
+
+# Env
+.env
+
+# IDE
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Coverage
+coverage/
